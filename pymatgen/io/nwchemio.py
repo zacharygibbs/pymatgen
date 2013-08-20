@@ -258,7 +258,7 @@ task $theory $operation""")
                 Input molecule
             \*\*kwargs:
                 Any of the other kwargs supported by NwTask. Note the theory
-                is always "dft" for a dft task.
+                is always "esp" for a esp task.
         """
         e = NwTask.from_molecule(mol, operation="",theory="esp", **kwargs)
 
