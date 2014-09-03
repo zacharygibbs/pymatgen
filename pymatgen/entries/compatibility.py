@@ -366,6 +366,66 @@ class Compatibility(object):
         """
         return filter(None, map(self.process_entry, entries))
 
+    def get_explanation_dict(self, entry):
+        """
+        Provides an explanation dict of the corrections that are being applied
+        for a given compatibility scheme. Inspired by the "explain" methods
+        in many database methodologies.
+
+        Args:
+            entry: A ComputedEntry.
+
+        Returns:
+            (dict) of the form
+            {"Compatibility": "string",
+            "Uncorrected_energy": float,
+            "Corrected_energy": float,
+            "Corrections": [{"Name of Correction": {
+            "Value": float, "Explanation": "string"}]}
+        """
+        centry = self.process_entry(entry)
+        if centry is None:
+            uncorrected_energy = entry.uncorrected_energy
+            corrected_energy = None
+        else:
+            uncorrected_energy = centry.uncorrected_energy
+            corrected_energy = centry.energy
+        d = {"Compatibility": self.__class__.__name__,
+             "Uncorrected_energy": uncorrected_energy,
+             "Corrected_energy": corrected_energy}
+        corrections = []
+        corr_dict = self.get_corrections_dict(entry)
+        for c in self.corrections:
+            cd = {"Name": str(c)}
+            cd["Description"] = c.__doc__.split("Args")[0].strip()
+            cd["Value"] = corr_dict.get(str(c), 0)
+            corrections.append(cd)
+        d["Corrections"] = corrections
+        return d
+
+    def explain(self, entry):
+        """
+        Prints an explanation of the corrections that are being applied for a
+        given compatibility scheme. Inspired by the "explain" methods in many
+        database methodologies.
+
+        Args:
+            entry: A ComputedEntry.
+        """
+        d = self.get_explanation_dict(entry)
+        print "The uncorrected value of the energy of %s is %f eV" % (
+            entry.composition, d["Uncorrected_energy"])
+        print "The following corrections / screening are applied for %s:\n" %\
+            d["Compatibility"]
+        for c in d["Corrections"]:
+            print "%s correction: %s\n" % (c["Name"],
+                                           c["Description"])
+            print "For the entry, this correction has the value %f eV." % c[
+                "Value"]
+            print "-" * 30
+
+        print "The final energy after corrections is %f" % d["Corrected_energy"]
+
 
 @cached_class
 class MaterialsProjectCompatibility(Compatibility):
