@@ -1,12 +1,16 @@
+# coding: utf-8
 """Tools and helper functions for abinit calculations"""
-from __future__ import print_function, division
+from __future__ import unicode_literals, division
 
 import os
 import collections
 import shutil
 import operator
 
-from pymatgen.util.string_utils import list_strings, StringColorizer, WildCard
+from six.moves import filter
+from monty.string import list_strings
+from monty.dev import deprecated
+from pymatgen.util.string_utils import WildCard
 
 import logging
 logger = logging.getLogger(__name__)
@@ -27,8 +31,7 @@ class File(object):
         return "<%s, %s>" % (self.__class__.__name__, self.path)
 
     def __eq__(self, other):
-        if other is None: return False
-        self.path == other.path
+        return False if other is None else self.path == other.path
                                        
     def __ne__(self, other):
         return not self.__eq__(other)
@@ -55,12 +58,12 @@ class File(object):
 
     @property
     def exists(self):
-        "True if file exists."
+        """True if file exists."""
         return os.path.exists(self.path)
 
     @property
     def isncfile(self):
-        "True if self is a NetCDF file"
+        """True if self is a NetCDF file"""
         return self.basename.endswith(".nc")
 
     def read(self):
@@ -113,8 +116,7 @@ class Directory(object):
         return "<%s, %s>" % (self.__class__.__name__, self.path)
 
     def __eq__(self, other):
-        if other is None: return False
-        self.path == other.path
+        return False if other is None else self.path == other.path
 
     def __ne__(self, other):
         return not self.__eq__(other)
@@ -159,9 +161,9 @@ class Directory(object):
         """Recursively delete the directory tree"""
         shutil.rmtree(self.path, ignore_errors=True)
 
-    def path_in(self, filename):
+    def path_in(self, file_basename):
         """Return the absolute path of filename in the directory."""
-        return os.path.join(self.path, filename)
+        return os.path.join(self.path, file_basename)
 
     def list_filepaths(self, wildcard=None):
         """
@@ -236,6 +238,7 @@ _EXT2VARS = {
     "DKK": {},
 }
 
+
 def irdvars_for_ext(ext):
     """
     Returns a dictionary with the ABINIT variables 
@@ -257,11 +260,8 @@ def abi_splitext(filename):
     Returns "(root, ext)" where ext is the registered ABINIT extension 
     The final ".nc" is included (if any) 
 
-    >>> abi_splitext("foo_WFK")
-    ('foo_', 'WFK')
-
-    >>> abi_splitext("/home/guido/foo_bar_WFK.nc")
-    ('foo_bar_', 'WFK.nc')
+    >>> assert abi_splitext("foo_WFK") == ('foo_', 'WFK')
+    >>> assert abi_splitext("/home/guido/foo_bar_WFK.nc") == ('foo_bar_', 'WFK.nc')
     """
     filename = os.path.basename(filename)
     is_ncfile = False
@@ -283,7 +283,7 @@ def abi_splitext(filename):
 
     root = filename[:i]
     if is_ncfile: 
-        ext = ext + ".nc"
+        ext += ".nc"
 
     return root, ext
 
@@ -308,12 +308,8 @@ class FilepathFixer(object):
     Example:
     
     >>> fixer = FilepathFixer()
-
-    >>> fixer.fix_paths('/foo/out_1WF17')
-    {'/foo/out_1WF17': '/foo/out_1WF'}
-
-    >>> fixer.fix_paths('/foo/out_1WF5.nc')
-    {'/foo/out_1WF5.nc': '/foo/out_1WF.nc'}
+    >>> assert fixer.fix_paths('/foo/out_1WF17') == {'/foo/out_1WF17': '/foo/out_1WF'}
+    >>> assert fixer.fix_paths('/foo/out_1WF5.nc') == {'/foo/out_1WF5.nc': '/foo/out_1WF.nc'}
     """
     def __init__(self):
         # dictionary mapping the *official* file extension to
@@ -363,7 +359,9 @@ class FilepathFixer(object):
             newpath, ext = self._fix_path(path)
 
             if newpath is not None:
-                assert ext not in fixed_exts
+                if ext not in fixed_exts:
+                    if ext == "1WF": continue
+                    raise ValueError("Unknown extension %s" % ext)
                 fixed_exts.append(ext)
                 old2new[path] = newpath
 
@@ -374,13 +372,16 @@ def _bop_not(obj):
     """Boolean not."""
     return not bool(obj)
 
+
 def _bop_and(obj1, obj2):
     """Boolean and."""
     return bool(obj1) and bool(obj2)
 
+
 def _bop_or(obj1, obj2):
     """Boolean or."""
     return bool(obj1) or bool(obj2)
+
 
 def _bop_divisible(num1, num2):
     """Return True if num1 is divisible by num2."""
@@ -417,8 +418,7 @@ def map2rpn(map, obj):
     3 - 4 + 5 -->   3 4 - 5 + 
 
     >>> d = {2.0: {'$eq': 1.0}}
-    >>> map2rpn(d, None)
-    [2.0, 1.0, '$eq']
+    >>> assert map2rpn(d, None) == [2.0, 1.0, '$eq']
     """
     rpn = []
 
@@ -510,7 +510,7 @@ def evaluate_rpn(rpn):
 
 class Condition(object):
     """
-    This object receive a dictionary that defines a boolean condition whose syntax is similar
+    This object receives a dictionary that defines a boolean condition whose syntax is similar
     to the one used in mongodb (albeit not all the operators available in mongodb are supported here).
 
     Example:
@@ -539,11 +539,17 @@ class Condition(object):
     def __str__(self):
         return str(self.cmap)
 
-    def apply(self, obj):
+    def __bool__(self):
+        return bool(self.cmap)
+
+    __nonzero__ = __bool__
+
+    def __call__(self, obj):
+        if not self: return True
         try:
             return evaluate_rpn(map2rpn(self.cmap, obj))
-        except:
-            logger.warning("Condition.apply() raise Exception")
+        except Exception as exc:
+            logger.warning("Condition(%s) raised Exception:\n %s" % (type(obj), str(exc)))
             return False
 
 
@@ -554,10 +560,7 @@ class Editor(object):
     """
     def __init__(self, editor=None):
         """If editor is None, $EDITOR is used."""
-        if editor is None:
-            self.editor = os.getenv("EDITOR", "vi")
-        else:
-            self.editor = str(editor)
+        self.editor = os.getenv("EDITOR", "vi") if editor is None else str(editor)
 
     def edit_files(self, fnames, ask_for_exit=True):
         exit_status = 0
@@ -579,6 +582,7 @@ class Editor(object):
 
     @staticmethod
     def user_wants_to_exit():
+        """Show an interactive prompt asking if exit is wanted."""
         try:
             answer = raw_input("Do you want to continue [Y/n]")
 

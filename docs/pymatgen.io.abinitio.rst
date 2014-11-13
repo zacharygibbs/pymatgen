@@ -42,6 +42,14 @@ pymatgen.io.abinitio.calculations module
     :undoc-members:
     :show-inheritance:
 
+pymatgen.io.abinitio.db module
+------------------------------
+
+.. automodule:: pymatgen.io.abinitio.db
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 pymatgen.io.abinitio.eos module
 -------------------------------
 
@@ -70,14 +78,6 @@ pymatgen.io.abinitio.launcher module
 ------------------------------------
 
 .. automodule:: pymatgen.io.abinitio.launcher
-    :members:
-    :undoc-members:
-    :show-inheritance:
-
-pymatgen.io.abinitio.myaml module
----------------------------------
-
-.. automodule:: pymatgen.io.abinitio.myaml
     :members:
     :undoc-members:
     :show-inheritance:

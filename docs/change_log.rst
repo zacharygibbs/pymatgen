@@ -1,6 +1,94 @@
 Change log
 ==========
 
+v3.0.7
+------
+* Powerful Slab generation algorithms (beta!).
+* Improvements to DiffusionAnalyzer with constant smoothing option.
+* Significantly improve look of DOS plots using prettyplotlib.
+
+v3.0.6
+------
+* Cost analysis module (Anubhav Jain)
+* More Py3k fixes.
+* Extensive abinitio updates (Matteo).
+
+v3.0.5
+------
+* Completely revamped symmetry package. The finder.SymmetryFinder and
+  pointgroup and spacegroup modules are now deprecated. Instead,
+  all symmetry analysis is in the :module:`pymatgen.symmetry.analyzer`_
+  module. There is also a completely rewritten support for symmetry groups in
+  :module:`pymatgen.symmetry.groups`_. Structure now supports a static
+  constructor to generate a structure from a spacegroup (see examples).
+* BatteryAnalyzer class (Anubhav Jain) to provide for some common analysis of
+  intercalation electrodes.
+* Minor bug fixes for structure_matcher, lattice, abinitio.
+* MOAB qadapter for abinit. (Liam Damewood)
+
+v3.0.4
+------
+* Fix missing structures json data.
+
+v3.0.3
+------
+* Updates to DiffusionAnalyzer for more fine-grained statistics.
+* Bug fixes and tweaks to linear assignment
+* Improved PymatgenTest class which provides a suite of test structures.
+* Speedups to Phase Diagram
+* Lots of improvements to Gaussian support (Nicolas Dardenne) and Abinit IO
+  (Matteo).
+* Lots of Py3k minor updates.
+* Updated doc for Diffusion anaylzer. Invert sq_disp_ions for more intuitive handling.
+
+v3.0.2
+------
+1. Consistent use of unicode throughout pymatgen.
+2. Minor bug fixes.
+
+v3.0.1
+------
+1. Minor bug fixes for cifio.
+2. Py3k updates for abinitio.
+
+v3.0.0
+------
+* Pymatgen is now completely Python 2.7 and Python 3.x compatible!
+* Spglib and pyhull have been updated to support Python 3.x.
+* Completely rewritten pure python cifio module (courtesy of William Davidson
+  Richards) removed dependency on PyCIFRW, which has been causing many issues
+  with installation.
+* Structure and Molecule now supports a very convenient to() and from_str and
+  from_file functionality. Instead of trying to load the appropriate parser,
+  you can output and read from the appropriate formats directly. See example
+  usage.
+* ~50% speedup to LinearAssignment code.
+* Continuous integration and contribution guidelines now include Python 3.
+* **Backwards incompatible changes**
+* matgenie.py has now been renamed simply "pmg" for brevity.
+* All deprecated methods in pymatgen 2.x have been removed. E.g.,
+  pymatgen.core.structure_modifier is no longer available.
+* Pymatgen classes now uses the as_dict() method protocol implemented in the
+  Monty package. The to_dict property is now deprecated and will be removed
+  in pymatgen v3.1.
+* Update main docs page examples with the new Structure to, from formats.
+
+v2.10.6
+-------
+* Bug fix for np1.9 incompatibility. Now works.
+* Use wheel for pymatgen deployments.
+* matgenie.py is now renamed to pmg for faster CLI usage.
+* Improvements to KPOINTS automatic generation.
+* Simpler and faster Structure.get_all_neighbors
+
+v2.10.5
+-------
+* DiffusionAnalyzer now has non-smoothed option.
+* Kpoints generation algorithm now guarantees minimum # of points.
+* Compatibility now has a proper explanation dict.
+* Vaspruns with NSW == 1 now checked properly for electronic conv.
+* make_movie now supports kwargs.
+
 v2.10.3
 -------
 * MPRester.query now supports a simple but powerful string criteria syntax
@@ -470,7 +558,6 @@ v2.2.0
 
 v2.1.2
 ------
-
 * Brand new CompoundPD class that allows the plotting of phase diagrams that
   do not have elements as their terminal points.
 * Spglib is now completely integrated as part of the setup.py installation.
@@ -487,12 +574,12 @@ v2.1.2
 
 v2.0.0
 ------
-
 * Brand new module (pymatgen.matproj.rest) for interfacing with the
   MaterialsProject REST interface.
 * Useful aliases for commonly used Objects, similar in style to numpy.
   Supported objects include Element, Composition, Structure, Molecule, Spin
   and Orbital. For example, the following will now work::
+
       import pymatgen as mg
       # Elemental Si
       fe = mg.Element("Si")

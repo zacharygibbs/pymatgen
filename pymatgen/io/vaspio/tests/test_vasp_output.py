@@ -1,8 +1,11 @@
+# coding: utf-8
+
+from __future__ import division, unicode_literals
+
 """
 Created on Jul 16, 2012
 """
 
-from __future__ import division
 
 __author__ = "Shyue Ping Ong"
 __copyright__ = "Copyright 2012, The Materials Project"
@@ -15,6 +18,7 @@ import unittest
 import os
 import json
 import numpy as np
+import warnings
 
 from pymatgen.io.vaspio.vasp_output import Chgcar, Locpot, Oszicar, Outcar, \
     Vasprun, Procar, Xdatcar
@@ -41,8 +45,8 @@ class VasprunTest(unittest.TestCase):
         vasprun_ggau = Vasprun(filepath2, parse_projected_eigen=True)
         totalscsteps = sum([len(i['electronic_steps'])
                             for i in vasprun.ionic_steps])
-        self.assertEquals(29, len(vasprun.ionic_steps))
-        self.assertEquals(len(vasprun.structures), len(vasprun.ionic_steps))
+        self.assertEqual(29, len(vasprun.ionic_steps))
+        self.assertEqual(len(vasprun.structures), len(vasprun.ionic_steps))
         self.assertEqual(vasprun.lattice,
                          vasprun.lattice_rec.reciprocal_lattice)
 
@@ -50,15 +54,15 @@ class VasprunTest(unittest.TestCase):
             self.assertEqual(vasprun.structures[i], step["structure"])
 
         self.assertTrue(all([vasprun.structures[i] == vasprun.ionic_steps[i][
-            "structure"] for i in xrange(len(vasprun.ionic_steps))]))
+            "structure"] for i in range(len(vasprun.ionic_steps))]))
 
-        self.assertEquals(308, totalscsteps,
-                          "Incorrect number of energies read from vasprun.xml")
+        self.assertEqual(308, totalscsteps,
+                         "Incorrect number of energies read from vasprun.xml")
 
-        self.assertEquals(['Li'] + 4 * ['Fe'] + 4 * ['P'] + 16 * ["O"],
-                          vasprun.atomic_symbols)
-        self.assertEquals(vasprun.final_structure.composition.reduced_formula,
-                          "LiFe4(PO4)4")
+        self.assertEqual(['Li'] + 4 * ['Fe'] + 4 * ['P'] + 16 * ["O"],
+                         vasprun.atomic_symbols)
+        self.assertEqual(vasprun.final_structure.composition.reduced_formula,
+                         "LiFe4(PO4)4")
         self.assertIsNotNone(vasprun.incar, "Incar cannot be read")
         self.assertIsNotNone(vasprun.kpoints, "Kpoints cannot be read")
         self.assertIsNotNone(vasprun.eigenvalues, "Eigenvalues cannot be read")
@@ -72,9 +76,9 @@ class VasprunTest(unittest.TestCase):
         self.assertEqual(direct, expectedans[3])
         self.assertFalse(vasprun.is_hubbard)
         self.assertEqual(vasprun.potcar_symbols,
-                         [u'PAW_PBE Li 17Jan2003', u'PAW_PBE Fe 06Sep2000',
-                          u'PAW_PBE Fe 06Sep2000', u'PAW_PBE P 17Jan2003',
-                          u'PAW_PBE O 08Apr2002'])
+                         ['PAW_PBE Li 17Jan2003', 'PAW_PBE Fe 06Sep2000',
+                          'PAW_PBE Fe 06Sep2000', 'PAW_PBE P 17Jan2003',
+                          'PAW_PBE O 08Apr2002'])
         self.assertIsNotNone(vasprun.kpoints, "Kpoints cannot be read")
         self.assertIsNotNone(vasprun.actual_kpoints,
                              "Actual kpoints cannot be read")
@@ -113,12 +117,14 @@ class VasprunTest(unittest.TestCase):
                                                                    0, 96,
                                                                    Orbital.s)],
                                0.0032)
-        d = vasprun_ggau.to_dict
+        d = vasprun_ggau.as_dict()
         self.assertEqual(d["elements"], ["Fe", "Li", "O", "P"])
         self.assertEqual(d["nelements"], 4)
 
         filepath = os.path.join(test_dir, 'vasprun.xml.unconverged')
         vasprun_unconverged = Vasprun(filepath)
+        self.assertTrue(vasprun_unconverged.converged_ionic)
+        self.assertFalse(vasprun_unconverged.converged_electronic)
         self.assertFalse(vasprun_unconverged.converged)
 
         filepath = os.path.join(test_dir, 'vasprun.xml.dfpt')
@@ -133,20 +139,35 @@ class VasprunTest(unittest.TestCase):
         self.assertAlmostEqual(entry.uncorrected_energy + entry.correction,
                                entry.energy)
 
+
+        filepath = os.path.join(test_dir, 'vasprun.xml.dfpt.ionic')
+        vasprun_dfpt_ionic = Vasprun(filepath)
+        self.assertAlmostEqual(vasprun_dfpt_ionic.epsilon_ionic[0][0], 515.73485838)
+        self.assertAlmostEqual(vasprun_dfpt_ionic.epsilon_ionic[0][1], -0.00263523)
+        self.assertAlmostEqual(vasprun_dfpt_ionic.epsilon_ionic[2][2], 19.02110169)
+
+
         filepath = os.path.join(test_dir, 'vasprun.xml.dfpt.unconverged')
         vasprun_dfpt_unconv = Vasprun(filepath)
+        self.assertFalse(vasprun_dfpt_unconv.converged_electronic)
+        self.assertTrue(vasprun_dfpt_unconv.converged_ionic)
         self.assertFalse(vasprun_dfpt_unconv.converged)
 
         vasprun_uniform = Vasprun(os.path.join(test_dir, "vasprun.xml.uniform"))
         self.assertEqual(vasprun_uniform.kpoints.style, "Reciprocal")
 
-    def test_to_dict(self):
+
+        vasprun_no_pdos = Vasprun(os.path.join(test_dir, "Li_no_projected.xml"))
+        self.assertIsNotNone(vasprun_no_pdos.complete_dos)
+        self.assertFalse(vasprun_no_pdos.dos_has_errors)
+
+    def test_as_dict(self):
         filepath = os.path.join(test_dir, 'vasprun.xml')
         vasprun = Vasprun(filepath)
-        #Test that to_dict is json-serializable
-        self.assertIsNotNone(json.dumps(vasprun.to_dict))
+        #Test that as_dict() is json-serializable
+        self.assertIsNotNone(json.dumps(vasprun.as_dict()))
         self.assertEqual(
-            vasprun.to_dict["input"]["potcar_type"],
+            vasprun.as_dict()["input"]["potcar_type"],
             ['PAW_PBE', 'PAW_PBE', 'PAW_PBE', 'PAW_PBE', 'PAW_PBE'])
 
     def test_get_band_structure(self):
@@ -170,43 +191,55 @@ class VasprunTest(unittest.TestCase):
         self.assertEqual(vbm['kpoint'].label, "\Gamma", "wrong vbm label")
         self.assertEqual(cbm['kpoint'].label, None, "wrong cbm label")
 
+    def test_sc_step_overflow(self):
+        filepath = os.path.join(test_dir, 'vasprun.xml.sc_overflow')
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            vasprun = Vasprun(filepath)
+            self.assertEqual(len(w), 3)
+        estep = vasprun.ionic_steps[0]['electronic_steps'][29]
+        self.assertTrue(np.isnan(estep['e_wo_entrp']))
+
 
 class OutcarTest(unittest.TestCase):
 
     def test_init(self):
-        filepath = os.path.join(test_dir, 'OUTCAR')
-        outcar = Outcar(filepath)
-        expected_mag = ({'d': 0.0, 'p': 0.003, 's': 0.002, 'tot': 0.005},
-                         {'d': 0.798, 'p': 0.008, 's': 0.007, 'tot': 0.813},
-                         {'d': 0.798, 'p': 0.008, 's': 0.007, 'tot': 0.813},
-                         {'d': 0.0, 'p':-0.117, 's': 0.005, 'tot':-0.112},
-                         {'d': 0.0, 'p':-0.165, 's': 0.004, 'tot':-0.162},
-                         {'d': 0.0, 'p':-0.117, 's': 0.005, 'tot':-0.112},
-                         {'d': 0.0, 'p':-0.165, 's': 0.004, 'tot':-0.162})
-        expected_chg = ({'p': 0.154, 's': 0.078, 'd': 0.0, 'tot': 0.232},
-                        {'p': 0.707, 's': 0.463, 'd': 8.316, 'tot': 9.486},
-                        {'p': 0.707, 's': 0.463, 'd': 8.316, 'tot': 9.486},
-                        {'p': 3.388, 's': 1.576, 'd': 0.0, 'tot': 4.964},
-                        {'p': 3.365, 's': 1.582, 'd': 0.0, 'tot': 4.947},
-                        {'p': 3.388, 's': 1.576, 'd': 0.0, 'tot': 4.964},
-                        {'p': 3.365, 's': 1.582, 'd': 0.0, 'tot': 4.947})
+        for f in ['OUTCAR', 'OUTCAR.gz']:
+            filepath = os.path.join(test_dir, f)
+            outcar = Outcar(filepath)
+            expected_mag = ({'d': 0.0, 'p': 0.003, 's': 0.002, 'tot': 0.005},
+                             {'d': 0.798, 'p': 0.008, 's': 0.007, 'tot': 0.813},
+                             {'d': 0.798, 'p': 0.008, 's': 0.007, 'tot': 0.813},
+                             {'d': 0.0, 'p':-0.117, 's': 0.005, 'tot':-0.112},
+                             {'d': 0.0, 'p':-0.165, 's': 0.004, 'tot':-0.162},
+                             {'d': 0.0, 'p':-0.117, 's': 0.005, 'tot':-0.112},
+                             {'d': 0.0, 'p':-0.165, 's': 0.004, 'tot':-0.162})
+            expected_chg = ({'p': 0.154, 's': 0.078, 'd': 0.0, 'tot': 0.232},
+                            {'p': 0.707, 's': 0.463, 'd': 8.316, 'tot': 9.486},
+                            {'p': 0.707, 's': 0.463, 'd': 8.316, 'tot': 9.486},
+                            {'p': 3.388, 's': 1.576, 'd': 0.0, 'tot': 4.964},
+                            {'p': 3.365, 's': 1.582, 'd': 0.0, 'tot': 4.947},
+                            {'p': 3.388, 's': 1.576, 'd': 0.0, 'tot': 4.964},
+                            {'p': 3.365, 's': 1.582, 'd': 0.0, 'tot': 4.947})
 
-        self.assertAlmostEqual(outcar.magnetization, expected_mag, 5,
-                               "Wrong magnetization read from Outcar")
-        self.assertAlmostEqual(outcar.charge, expected_chg, 5,
-                               "Wrong charge read from Outcar")
-        self.assertFalse(outcar.is_stopped)
-        self.assertEqual(outcar.run_stats, {'System time (sec)': 0.938,
-                                            'Total CPU time used (sec)': 545.142,
-                                            'Elapsed time (sec)': 546.709,
-                                            'Maximum memory used (kb)': 0.0,
-                                            'Average memory used (kb)': 0.0,
-                                            'User time (sec)': 544.204})
-        self.assertAlmostEqual(outcar.efermi, 2.0112)
-        self.assertAlmostEqual(outcar.nelect, 44.9999991)
-        self.assertAlmostEqual(outcar.total_mag, 0.9999998)
+            self.assertAlmostEqual(outcar.magnetization, expected_mag, 5,
+                                   "Wrong magnetization read from Outcar")
+            self.assertAlmostEqual(outcar.charge, expected_chg, 5,
+                                   "Wrong charge read from Outcar")
+            self.assertFalse(outcar.is_stopped)
+            self.assertEqual(outcar.run_stats, {'System time (sec)': 0.938,
+                                                'Total CPU time used (sec)': 545.142,
+                                                'Elapsed time (sec)': 546.709,
+                                                'Maximum memory used (kb)': 0.0,
+                                                'Average memory used (kb)': 0.0,
+                                                'User time (sec)': 544.204,
+                                                'cores': '8'})
+            self.assertAlmostEqual(outcar.efermi, 2.0112)
+            self.assertAlmostEqual(outcar.nelect, 44.9999991)
+            self.assertAlmostEqual(outcar.total_mag, 0.9999998)
 
-        self.assertIsNotNone(outcar.to_dict)
+            self.assertIsNotNone(outcar.as_dict())
+
         filepath = os.path.join(test_dir, 'OUTCAR.stopped')
         outcar = Outcar(filepath)
         self.assertTrue(outcar.is_stopped)
@@ -215,6 +248,29 @@ class OutcarTest(unittest.TestCase):
         filepath = os.path.join(test_dir, "OUTCAR.CL")
         cl = Outcar(filepath).read_core_state_eigen()
         self.assertAlmostEqual(cl[6]["2s"][-1], -174.4779)
+
+    def test_single_atom(self):
+        filepath = os.path.join(test_dir, "OUTCAR.Al")
+        outcar = Outcar(filepath)
+        expected_mag = ({u'p': 0.0, u's': 0.0, u'd': 0.0, u'tot': 0.0},)
+        expected_chg = ({u'p': 0.343, u's': 0.425, u'd': 0.0, u'tot': 0.768},)
+
+        self.assertAlmostEqual(outcar.magnetization, expected_mag)
+        self.assertAlmostEqual(outcar.charge, expected_chg)
+        self.assertFalse(outcar.is_stopped)
+        self.assertEqual(outcar.run_stats, {'System time (sec)': 0.592,
+                                            'Total CPU time used (sec)': 50.194,
+                                            'Elapsed time (sec)': 52.337,
+                                            'Maximum memory used (kb)': 62900.0,
+                                            'Average memory used (kb)': 0.0,
+                                            'User time (sec)': 49.602,
+                                            'cores': '32'})
+        self.assertAlmostEqual(outcar.efermi, 8.0942)
+        self.assertAlmostEqual(outcar.nelect, 3)
+        self.assertAlmostEqual(outcar.total_mag, 8.2e-06)
+
+        self.assertIsNotNone(outcar.as_dict())
+
 
 class OszicarTest(unittest.TestCase):
 
@@ -288,13 +344,19 @@ class ProcarTest(unittest.TestCase):
 class XdatcarTest(unittest.TestCase):
 
     def test_init(self):
-        filepath = os.path.join(test_dir, 'XDATCAR')
+        filepath = os.path.join(test_dir, 'XDATCAR_4')
         x = Xdatcar(filepath)
         structures = x.structures
         self.assertEqual(len(structures), 3)
         for s in structures:
             self.assertEqual(s.formula, "Li2 O1")
 
+        filepath = os.path.join(test_dir, 'XDATCAR_5')
+        x = Xdatcar(filepath)
+        structures = x.structures
+        self.assertEqual(len(structures), 3)
+        for s in structures:
+            self.assertEqual(s.formula, "Li2 O1")
 
 if __name__ == "__main__":
     #import sys;sys.argv = ['', 'Test.testName']

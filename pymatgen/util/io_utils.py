@@ -1,3 +1,7 @@
+# coding: utf-8
+
+from __future__ import unicode_literals
+
 """
 This module provides utility classes for io operations.
 """
@@ -12,9 +16,7 @@ __date__ = "Sep 23, 2011"
 
 import re
 import numpy
-import os
-import time
-import errno
+import six
 
 
 def clean_lines(string_list, remove_empty_lines=True):
@@ -72,8 +74,7 @@ def micro_pyawk(filename, search, results=None, debug=None, postdebug=None):
 
     # Compile strings into regexs
     for entry in search:
-        if isinstance(entry[0], str):
-            entry[0] = re.compile(entry[0])
+        entry[0] = re.compile(entry[0])
 
     with open(filename) as f:
         for line in f:
@@ -88,132 +89,3 @@ def micro_pyawk(filename, search, results=None, debug=None, postdebug=None):
                         postdebug(results, match)
 
     return results
-
-
-def clean_json(input_json, strict=False):
-    """
-    This method cleans an input json-like dict object, either a list or a dict,
-    nested or otherwise, by converting all non-string dictionary keys (such as
-    int and float) to strings.
-
-    Args:
-        input_dict: input dictionary.
-        strict: This parameters sets the behavior when clean_json encounters an
-            object it does not understand. If strict is True, clean_json will
-            try to get the to_dict attribute of the object. If no such
-            attribute is found, an attribute error will be thrown. If strict is
-            False, clean_json will simply call str(object) to convert the
-            object to a string representation.
-
-    Returns:
-        Sanitized dict that can be json serialized.
-    """
-    if isinstance(input_json, (list, numpy.ndarray, tuple)):
-        return [clean_json(i, strict=strict) for i in input_json]
-    elif isinstance(input_json, dict):
-        return {str(k): clean_json(v, strict=strict)
-                for k, v in input_json.items()}
-    elif isinstance(input_json, (int, float)):
-        return input_json
-    elif input_json is None:
-        return None
-    else:
-        if not strict:
-            return str(input_json)
-        else:
-            if isinstance(input_json, basestring):
-                return str(input_json)
-            else:
-                return clean_json(input_json.to_dict, strict=strict)
-
-
-class FileLockException(Exception):
-    """Exception raised by FileLock."""
-
-
-class FileLock(object):
-    """
-    A file locking mechanism that has context-manager support so you can use
-    it in a with statement. This should be relatively cross-compatible as it
-    doesn't rely on msvcrt or fcntl for the locking.
-    Taken from http://www.evanfosmark.com/2009/01/cross-platform-file-locking
-    -support-in-python/
-    """
-    Error = FileLockException
-
-    def __init__(self, file_name, timeout=10, delay=.05):
-        """
-        Prepare the file locker. Specify the file to lock and optionally
-        the maximum timeout and the delay between each attempt to lock.
-
-        Args:
-            file_name: Name of file to lock.
-            timeout: Maximum timeout for locking. Defaults to 10.
-            delay: Delay between each attempt to lock. Defaults to 0.05.
-        """
-        self.file_name = os.path.abspath(file_name)
-        self.lockfile = os.path.abspath(file_name) + ".lock"
-        self.timeout = float(timeout)
-        self.delay = float(delay)
-        self.is_locked = False
-
-        if self.delay > self.timeout or self.delay <= 0 or self.timeout <= 0:
-            raise ValueError("delay and timeout must be positive with delay "
-                             "<= timeout")
-
-    def acquire(self):
-        """
-        Acquire the lock, if possible. If the lock is in use, it check again
-        every `delay` seconds. It does this until it either gets the lock or
-        exceeds `timeout` number of seconds, in which case it throws
-        an exception.
-        """
-        start_time = time.time()
-        while True:
-            try:
-                self.fd = os.open(self.lockfile,
-                                  os.O_CREAT | os.O_EXCL | os.O_RDWR)
-                break
-            except (OSError,) as e:
-                if e.errno != errno.EEXIST:
-                    raise
-                if (time.time() - start_time) >= self.timeout:
-                    raise FileLockException("%s: Timeout occured." %
-                                            self.lockfile)
-                time.sleep(self.delay)
-
-        self.is_locked = True
-
-    def release(self):
-        """ Get rid of the lock by deleting the lockfile.
-            When working in a `with` statement, this gets automatically
-            called at the end.
-        """
-        if self.is_locked:
-            os.close(self.fd)
-            os.unlink(self.lockfile)
-            self.is_locked = False
-
-    def __enter__(self):
-        """
-        Activated when used in the with statement. Should automatically
-        acquire a lock to be used in the with block.
-        """
-        if not self.is_locked:
-            self.acquire()
-        return self
-
-    def __exit__(self, type, value, traceback):
-        """
-        Activated at the end of the with statement. It automatically releases
-        the lock if it isn't locked.
-        """
-        if self.is_locked:
-            self.release()
-
-    def __del__(self):
-        """
-        Make sure that the FileLock instance doesn't leave a lockfile
-        lying around.
-        """
-        self.release()

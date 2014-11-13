@@ -1,3 +1,7 @@
+# coding: utf-8
+
+from __future__ import unicode_literals
+
 """
 Created on Nov 14, 2012
 """
@@ -12,10 +16,9 @@ __date__ = "Nov 14, 2012"
 
 import unittest
 import os
-import json
 
 from pymatgen.util.testing import PymatgenTest
-from pymatgen.util.io_utils import FileLock, FileLockException, clean_json
+from pymatgen.util.io_utils import micro_pyawk
 
 test_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..",
                         'test_files')
@@ -23,35 +26,13 @@ test_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..",
 
 class FuncTest(PymatgenTest):
 
-    def test_clean_json(self):
-        #clean_json should have no effect on None types.
-        d = {"hello": 1, "world": None}
-        clean = clean_json(d)
-        self.assertIsNone(clean["world"])
-        self.assertEqual(json.dumps(d), json.dumps(clean))
-
-        d = {"hello": self.get_test_structure()}
-        self.assertRaises(TypeError, json.dumps, d)
-        clean = clean_json(d)
-        self.assertIsInstance(clean["hello"], basestring)
-        clean_strict = clean_json(d, strict=True)
-        self.assertIsInstance(clean_strict["hello"], dict)
-
-
-class FileLockTest(unittest.TestCase):
-
-    def setUp(self):
-        self.file_name = "__lock__"
-        self.lock = FileLock(self.file_name, timeout=1)
-        self.lock.acquire()
-
-    def test_raise(self):
-        with self.assertRaises(FileLockException):
-            new_lock = FileLock(self.file_name, timeout=1)
-            new_lock.acquire()
-
-    def tearDown(self):
-        self.lock.release()
+    def test_micro_pyawk(self):
+        filename = os.path.join(test_dir, "OUTCAR")
+        data = []
+        def f(x, y):
+            data.append(y.group(1).strip())
+        micro_pyawk(filename, [["POTCAR:(.*)", lambda x: x, f]])
+        self.assertEqual(len(data), 6)
 
 if __name__ == "__main__":
     unittest.main()

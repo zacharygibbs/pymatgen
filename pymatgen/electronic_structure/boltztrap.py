@@ -1,3 +1,7 @@
+# coding: utf-8
+
+from __future__ import division, unicode_literals, print_function
+
 """
 This module provides classes to run and analyze boltztrap on pymatgen band
 structure objects. Boltztrap is a software interpolating band structures and
@@ -17,7 +21,6 @@ References are::
     Computer Physics Communications, 175, 67-71
 """
 
-from __future__ import division
 
 __author__ = "Geoffroy Hautier"
 __copyright__ = "Copyright 2013, The Materials Project"
@@ -33,12 +36,13 @@ import math
 import numpy as np
 import tempfile
 from pymatgen.core.lattice import Lattice
-from pymatgen.symmetry.finder import SymmetryFinder
+from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 from pymatgen.electronic_structure.dos import Dos, Spin, CompleteDos
 from pymatgen.electronic_structure.core import Orbital
 from pymatgen.electronic_structure.plotter import DosPlotter
 from monty.os.path import which
 from monty.dev import requires
+from monty.json import jsanitize
 from pymatgen.core.units import Energy, Length
 from pymatgen.core.physical_constants import e, ELECTRON_MASS
 import subprocess
@@ -120,7 +124,7 @@ class BoltztrapRunner():
                     f.write("%18.8f\n" % float(tmp_eigs[j]))
 
     def _make_struc_file(self, file_name):
-        sym = SymmetryFinder(self._bs._structure, symprec=0.01)
+        sym = SpacegroupAnalyzer(self._bs._structure, symprec=0.01)
         with open(file_name, 'w') as f:
             f.write(self._bs._structure.composition.formula+" " +
                     str(sym.get_spacegroup_symbol())+"\n")
@@ -291,8 +295,8 @@ class BoltztrapRunner():
                     warning = True
                     break
             if warning:
-                print "There was a warning! Increase lpfac to " + \
-                      str(self.lpfac * 2)
+                print("There was a warning! Increase lpfac to " + \
+                      str(self.lpfac * 2))
                 self.lpfac *= 2
                 self._make_intrans_file(os.path.join(path_dir,
                                                      dir_bz_name + ".intrans"))
@@ -317,7 +321,7 @@ class BoltztrapRunner():
                     break
         if not doping_ok:
             self.energy_grid /= 10
-            print "lowers energy grid to "+str(self.energy_grid)
+            print("lowers energy grid to " + str(self.energy_grid))
             if self.energy_grid < 0.00005:
                 raise BoltztrapError("energy grid lower than 0.00005 and still no good doping")
             self._make_intrans_file(path_dir + "/" + dir_bz_name + ".intrans")
@@ -331,10 +335,10 @@ class BoltztrapRunner():
                         - prev_sigma)\
                 / prev_sigma > 0.05:
             if prev_sigma is not None:
-                print abs(sum(analyzer.get_eig_average_eff_mass_tensor()['n'])
+                print((abs(sum(analyzer.get_eig_average_eff_mass_tensor()['n'])
                           / 3 - prev_sigma) / prev_sigma, \
                     self.lpfac, \
-                    analyzer.get_average_eff_mass_tensor(300, 1e18)
+                    analyzer.get_average_eff_mass_tensor(300, 1e18)))
             self.lpfac *= 2
             if self.lpfac > 100:
                 raise BoltztrapError("lpfac higher than 100 and still not converged")
@@ -758,9 +762,8 @@ class BoltztrapAnalyzer():
             doping, data_doping_full, data_doping_hall, vol, warning)
 
 
-    @property
-    def to_dict(self):
-        from pymatgen.util.io_utils import clean_json
+    def as_dict(self):
+
         results = {'gap': self.gap,
                    'mu_steps': self.mu_steps,
                    'cond': self.cond,
@@ -773,11 +776,11 @@ class BoltztrapAnalyzer():
                    'cond_doping': self.cond_doping,
                    'kappa_doping': self.kappa_doping,
                    'hall_doping': self.hall_doping,
-                   'dos': self.dos.to_dict,
+                   'dos': self.dos.as_dict(),
                    'dos_partial': self._dos_partial,
                    'carrier_conc': self.carrier_conc,
                    'vol': self.vol}
-        return clean_json(results)
+        return jsanitize(results)
 
     @staticmethod
     def from_dict(data):
@@ -831,7 +834,7 @@ class BoltztrapAnalyzer():
              'n': {int(d): [_make_float_hall(v)
                             for v in data['hall_doping']['n'][d]]
                    for d in data['hall_doping']['n']}},
-            Dos.from_dict(data['dos']), data['dos_partial'], data['carrier_conc'], 
+            Dos.from_dict(data['dos']), data['dos_partial'], data['carrier_conc'],
             data['vol'], str(data['warning']))
 
 
@@ -985,4 +988,3 @@ class BoltztrapPlotter():
         plt.xticks(fontsize=25)
         plt.yticks(fontsize=25)
         return plt
-

@@ -1,39 +1,36 @@
-"""
-Abinit Workflows
-"""
-from __future__ import division, print_function
+# coding: utf-8
+"""Abinit Workflows"""
+from __future__ import unicode_literals, division, print_function
 
-import sys
 import os
 import shutil
 import time
 import abc
 import collections
 import numpy as np
+import six
+
+from six.moves import filter
+from prettytable import PrettyTable
+from monty.collections import AttrDict
+from monty.itertools import chunks
+from monty.pprint import pprint_table
+from monty.functools import lazy_property
+from pymatgen.core.units import EnergyArray
+from pymatgen.serializers.json_coders import PMGSONable, json_pretty_dump
+from pymatgen.util.string_utils import WildCard
+from . import wrappers
+from .tasks import (Task, AbinitTask, Dependency, Node, NodeResults, ScfTask, NscfTask, PhononTask, DdkTask, BseTask, RelaxTask)
+from .strategies import HtcStrategy # ScfStrategy, RelaxStrategy
+from .utils import Directory
+from .netcdf import ETSF_Reader
+from .abitimer import AbinitTimerParser
+from .abiinspect import yaml_read_kpoints
 
 try:
     from pydispatch import dispatcher
 except ImportError:
     pass
-
-from pymatgen.core.units import ArrayWithUnit, Ha_to_eV
-from pymatgen.core.lattice import Lattice
-from pymatgen.core.structure import Structure
-from pymatgen.core.design_patterns import Enum, AttrDict
-from pymatgen.serializers.json_coders import MSONable, json_pretty_dump
-from pymatgen.io.smartio import read_structure
-from pymatgen.util.num_utils import iterator_from_slice, chunks, monotonic
-from pymatgen.util.string_utils import list_strings, pprint_table, WildCard
-from pymatgen.io.abinitio import wrappers
-from pymatgen.io.abinitio.tasks import (Task, AbinitTask, Dependency, Node, ScfTask, NscfTask, HaydockBseTask, RelaxTask)
-from pymatgen.io.abinitio.strategies import Strategy
-from pymatgen.io.abinitio.utils import File, Directory
-from pymatgen.io.abinitio.netcdf import ETSF_Reader
-from pymatgen.io.abinitio.abiobjects import Smearing, AbiStructure, KSampling, Electrons
-from pymatgen.io.abinitio.pseudos import Pseudo
-from pymatgen.io.abinitio.strategies import ScfStrategy
-from pymatgen.io.abinitio.eos import EOS
-from pymatgen.io.abinitio.abitimer import AbinitTimerParser
 
 import logging
 logger = logging.getLogger(__name__)
@@ -43,27 +40,47 @@ __copyright__ = "Copyright 2013, The Materials Project"
 __version__ = "0.1"
 __maintainer__ = "Matteo Giantomassi"
 
+
 __all__ = [
     "Workflow",
-    "IterativeWorkflow",
     "BandStructureWorkflow",
     "RelaxWorkflow",
-    "DeltaFactorWorkflow",
     "G0W0_Workflow",
+    "QptdmWorkflow",
     "SigmaConvWorkflow",
     "BSEMDF_Workflow",
     "PhononWorkflow",
 ]
 
 
+class WorkResults(NodeResults):
+    JSON_SCHEMA = NodeResults.JSON_SCHEMA.copy() 
+
+    @classmethod
+    def from_node(cls, work):
+        """Initialize an instance from a WorkFlow instance."""
+        new = super(WorkResults, cls).from_node(work)
+
+        #new.update(
+        #    #input=work.strategy
+        #)
+
+        # Will put all files found in outdir in GridFs 
+        # Warning: assuming binary files.
+        d = {os.path.basename(f): f for f in work.outdir.list_filepaths()}
+        new.add_gridfs_files(**d)
+
+        return new
+
+
 class WorkflowError(Exception):
     """Base class for the exceptions raised by Workflow objects."""
 
 
-class BaseWorkflow(Node):
-    __metaclass__ = abc.ABCMeta
-
+class BaseWorkflow(six.with_metaclass(abc.ABCMeta, Node)):
     Error = WorkflowError
+
+    Results = WorkResults
 
     # interface modeled after subprocess.Popen
     @abc.abstractproperty
@@ -97,7 +114,7 @@ class BaseWorkflow(Node):
 
     def show_intrawork_deps(self):
         """Show the dependencies within the `Workflow`."""
-        table = [["Task #"] + [str(i) for i in range(len(self))]]
+        table = PrettyTable(["Task #"] + [str(i) for i in range(len(self))])
 
         for ii, task1 in enumerate(self):
             line = (1 + len(self)) * [""]
@@ -105,10 +122,9 @@ class BaseWorkflow(Node):
             for jj, task2 in enumerate(self):
                 if task1.depends_on(task2):
                     line[jj+1] = "^"
+            table.add_row(line)
 
-            table.append(line)
-
-        pprint_table(table)
+        print(table)
 
     @property
     def returncodes(self):
@@ -120,30 +136,30 @@ class BaseWorkflow(Node):
         return [task.returncode for task in self]
 
     @property
-    def ncpus_reserved(self):
+    def ncores_reserved(self):
         """
-        Returns the number of CPUs reserved in this moment.
-        A CPUS is reserved if it's still not running but 
+        Returns the number of cores reserved in this moment.
+        A core is reserved if it's still not running but 
         we have submitted the task to the queue manager.
         """
-        return sum(task.tot_ncpus for task in self if task.status == task.S_SUB)
+        return sum(task.tot_cores for task in self if task.status == task.S_SUB)
 
     @property
-    def ncpus_allocated(self):
+    def ncores_allocated(self):
         """
         Returns the number of CPUs allocated in this moment.
-        A CPU is allocated if it's running a task or if we have
+        A core is allocated if it's running a task or if we have
         submitted a task to the queue manager but the job is still pending.
         """
-        return sum(task.tot_ncpus for task in self if task.status in [task.S_SUB, task.S_RUN])
+        return sum(task.tot_cores for task in self if task.status in [task.S_SUB, task.S_RUN])
 
     @property
-    def ncpus_inuse(self):
+    def ncores_inuse(self):
         """
-        Returns the number of CPUs used in this moment.
-        A CPU is used if there's a job that is running on it.
+        Returns the number of cores used in this moment.
+        A core is used if there's a job that is running on it.
         """
-        return sum(task.tot_ncpus for task in self if task.status == task.S_RUN)
+        return sum(task.tot_cores for task in self if task.status == task.S_RUN)
 
     def fetch_task_to_run(self):
         """
@@ -160,7 +176,6 @@ class BaseWorkflow(Node):
 
         for task in self:
             if task.can_run:
-                #print(task, str(task.status), [task.deps_status])
                 return task
 
         # No task found, this usually happens when we have dependencies. 
@@ -201,6 +216,7 @@ class BaseWorkflow(Node):
     def on_ok(self, sender):
         """
         This callback is called when one task reaches status S_OK.
+        It executes on_all_ok when all task in self have reached S_OK.
         """
         logger.debug("in on_ok with sender %s" % sender)
 
@@ -209,12 +225,20 @@ class BaseWorkflow(Node):
                 return AttrDict(returncode=0, message="Workflow has been already finalized")
 
             else:
-                results = AttrDict(**self.on_all_ok())
+                # Set finalized here, because on_all_ok might change it (e.g. Relax + EOS in a single workflow)
                 self._finalized = True
+                try:
+                    results = AttrDict(**self.on_all_ok())
+                except:
+                    self._finalized = False
+                    raise
+
                 # Signal to possible observers that the `Workflow` reached S_OK
-                print("Workflow %s is finalized and broadcasts signal S_OK" % str(self))
-                print("Workflow %s status = %s" % (str(self), self.status))
-                dispatcher.send(signal=self.S_OK, sender=self)
+                logger.info("Workflow %s is finalized and broadcasts signal S_OK" % str(self))
+                logger.info("Workflow %s status = %s" % (str(self), self.status))
+
+                if self._finalized:
+                    dispatcher.send(signal=self.S_OK, sender=self)
 
                 return results
 
@@ -232,17 +256,15 @@ class BaseWorkflow(Node):
                 message: 
                     a string that should provide a human-readable description of what has been performed.
         """
-        return dict(returncode=0, 
-                    message="Calling on_all_ok of the base class!",
-                    )
+        return dict(returncode=0, message="Calling on_all_ok of the base class!")
 
-    def get_results(self):
+    def get_results(self, **kwargs):
         """
         Method called once the calculations are completed.
-
-        The base version returns a dictionary task_name : TaskResults for each task in self.
+        The base version returns a dictionary task_name: TaskResults for each task in self.
         """
-        return WorkflowResults(task_results={task.name: task.results for task in self})
+        results = self.Results.from_node(self)
+        return results
 
 
 class Workflow(BaseWorkflow):
@@ -288,6 +310,14 @@ class Workflow(BaseWorkflow):
             if self._flow != flow:
                 raise ValueError("self._flow != flow")
 
+    @lazy_property
+    def pos(self):
+        """The position of self in the Flow"""
+        for i, work in enumerate(self.flow):
+            if self == work: 
+                return i
+        raise ValueError("Cannot find the position of %s in flow %s" % (self, self.flow))
+
     def set_workdir(self, workdir, chroot=False):
         """Set the working directory. Cannot be set more than once unless chroot is True"""
         if not chroot and hasattr(self, "workdir") and self.workdir != workdir:
@@ -307,7 +337,7 @@ class Workflow(BaseWorkflow):
         self.set_workdir(new_workdir, chroot=True)
 
         for i, task in enumerate(self):
-            new_tdir = os.path.join(self.workdir, "task_" + str(i))
+            new_tdir = os.path.join(self.workdir, "t" + str(i))
             task.set_workdir(new_tdir, chroot=True)
 
     def __len__(self):
@@ -384,14 +414,10 @@ class Workflow(BaseWorkflow):
 
             if not hasattr(task, "manager"):
                 # Set the manager
-                if manager is not None:
-                    # Use the one provided in input.
-                    task.set_manager(manager)
-                else:
-                    # Use the one of the workflow.
-                    task.set_manager(self.manager)
+                # Use the one provided in input else the one of the workflow.
+                task.set_manager(manager) if manager is not None else task.set_manager(self.manager)
 
-            task_workdir = os.path.join(self.workdir, "task_" + str(i))
+            task_workdir = os.path.join(self.workdir, "t" + str(i))
 
             if not hasattr(task, "workdir"):
                 task.set_workdir(task_workdir)
@@ -412,6 +438,9 @@ class Workflow(BaseWorkflow):
                 None means that this obj has no dependency.
             required_files:
                 List of strings with the path of the files used by the task.
+                Note that the files must exist when the task is registered.
+                Use the standard approach based on Workflows, Tasks and deps 
+                if the files will be produced in the future.
             manager:
                 The `TaskManager` responsible for the submission of the task. If manager is None, we use 
                 the `TaskManager` specified during the creation of the `Workflow`.
@@ -423,7 +452,7 @@ class Workflow(BaseWorkflow):
         """
         task_workdir = None
         if hasattr(self, "workdir"):
-            task_workdir = os.path.join(self.workdir, "task_" + str(len(self)))
+            task_workdir = os.path.join(self.workdir, "t" + str(len(self)))
 
         if isinstance(obj, Task):
             task = obj
@@ -433,7 +462,7 @@ class Workflow(BaseWorkflow):
             if task_class is None:
                 task_class = AbinitTask
 
-            if isinstance(obj, Strategy):
+            if isinstance(obj, HtcStrategy):
                 # Create the new task (note the factory so that we create subclasses easily).
                 task = task_class(obj, task_workdir, manager)
 
@@ -444,7 +473,7 @@ class Workflow(BaseWorkflow):
 
         # Handle possible dependencies.
         if deps is not None:
-            deps = [Dependency(node, exts) for (node, exts) in deps.items()]
+            deps = [Dependency(node, exts) for node, exts in deps.items()]
             task.add_deps(deps)
 
         # Handle possible dependencies.
@@ -452,6 +481,36 @@ class Workflow(BaseWorkflow):
             task.add_required_files(required_files)
 
         return task
+
+    # Helper functions
+    def register_scf_task(self, *args, **kwargs):
+        """Register a Scf task."""
+        kwargs["task_class"] = ScfTask
+        return self.register(*args, **kwargs)
+                                                    
+    def register_nscf_task(self, *args, **kwargs):
+        """Register a nscf task."""
+        kwargs["task_class"] = NscfTask
+        return self.register(*args, **kwargs)
+                                                    
+    def register_relax_task(self, *args, **kwargs):
+        """Register a task for structural optimization."""
+        kwargs["task_class"] = RelaxTask
+        return self.register(*args, **kwargs)
+
+    def register_phonon_task(self, *args, **kwargs):
+        """Register a phonon task."""
+        kwargs["task_class"] = PhononTask
+        return self.register(*args, **kwargs)
+
+    def register_ddk_task(self, *args, **kwargs):
+        """Register a nscf task."""
+        kwargs["task_class"] = DdkTask
+        return self.register(*args, **kwargs)
+
+    def register_bse_task(self, *args, **kwargs):
+        """Register a nscf task."""
+        kwargs["task_class"] = BseTask
 
     def path_in_workdir(self, filename):
         """Create the absolute path of filename in the working directory."""
@@ -502,9 +561,7 @@ class Workflow(BaseWorkflow):
                 return [self.S_INIT]
 
         self.check_status()
-
         status_list = [task.status for task in self]
-        #print("status_list", status_list)
 
         if only_min:
             return min(status_list)
@@ -517,9 +574,12 @@ class Workflow(BaseWorkflow):
         for task in self:
             task.check_status()
 
-        # Take into account possible dependencies.Use a list instead of generators 
+        # Take into account possible dependencies. Use a list instead of generators 
         for task in self:
-            if task.status <= task.S_SUB and all([status == task.S_OK for status in task.deps_status]): 
+            # changed <= to <
+            # todo should this not be < ? a task that is already submitted should not be put to ready
+            # it does no harm because of the lock file but logically it seems wrong also gives the wrong infromation
+            if task.status < task.S_SUB and all([status == task.S_OK for status in task.deps_status]):
                 task.set_status(task.S_READY)
 
     def rmtree(self, exclude_wildcard=""):
@@ -581,8 +641,8 @@ class Workflow(BaseWorkflow):
         """
         for task in self:
             task.start()
-
-        if wait: 
+    
+        if wait:
             for task in self: task.wait()
 
     def start(self, *args, **kwargs):
@@ -592,16 +652,16 @@ class Workflow(BaseWorkflow):
         """
         wait = kwargs.pop("wait", False)
 
-        # Build dirs and files.
-        self.build(*args, **kwargs)
-
         # Initial setup
         self._setup(*args, **kwargs)
+
+        # Build dirs and files.
+        self.build(*args, **kwargs)
 
         # Submit tasks (does not block)
         self.submit_tasks(wait=wait)
 
-    def read_etotal(self):
+    def read_etotals(self, unit="Ha"):
         """
         Reads the total energy from the GSR file produced by the task.
 
@@ -611,7 +671,7 @@ class Workflow(BaseWorkflow):
         if not self.all_done:
             raise self.Error("Some task is still in running/submitted state")
 
-        etotal = []
+        etotals = []
         for task in self:
             # Open the GSR file and read etotal (Hartree)
             gsr_path = task.outdir.has_abiext("GSR")
@@ -620,9 +680,9 @@ class Workflow(BaseWorkflow):
                 with ETSF_Reader(gsr_path) as r:
                     etot = r.read_value("etotal")
                 
-            etotal.append(etot)
+            etotals.append(etot)
 
-        return etotal
+        return EnergyArray(etotals, "Ha").to(unit)
 
     def parse_timers(self):
         """
@@ -631,439 +691,12 @@ class Workflow(BaseWorkflow):
         Returns:
             `AbinitTimerParser` object
         """
-        filenames = filter(os.path.exists, [task.output_file.path for task in self])
+        filenames = list(filter(os.path.exists, [task.output_file.path for task in self]))
                                                                            
         parser = AbinitTimerParser()
         parser.parse(filenames)
                                                                            
         return parser
-
-
-class IterativeWorkflow(Workflow):
-    """
-    This object defines a `Workflow` that produces `Tasks` until a particular 
-    condition is satisfied (mainly used for convergence studies or iterative algorithms.)
-    """
-    __metaclass__ = abc.ABCMeta
-
-    def __init__(self, strategy_generator, max_niter=25, workdir=None, manager=None):
-        """
-        Args:
-            strategy_generator:
-                Generator object that produces `Strategy` objects.
-            max_niter:
-                Maximum number of iterations. A negative value or zero value
-                is equivalent to having an infinite number of iterations.
-            workdir:
-                Working directory.
-            manager:
-                `TaskManager` class.
-        """
-        super(IterativeWorkflow, self).__init__(workdir, manager)
-
-        self.strategy_generator = strategy_generator
-
-        self._max_niter = max_niter
-        self.niter = 0
-
-    @property
-    def max_niter(self):
-        return self._max_niter
-
-    #def set_max_niter(self, max_niter):
-    #    self._max_niter = max_niter
-
-    #def set_inputs(self, inputs):
-    #    self.strategy_generator = list(inputs)
-
-    def next_task(self):
-        """
-        Generate and register a new `Task`.
-
-        Returns: 
-            New `Task` object
-        """
-        try:
-            next_strategy = next(self.strategy_generator)
-
-        except StopIteration:
-            raise
-
-        self.register(next_strategy)
-        assert len(self) == self.niter
-
-        return self[-1]
-
-    def submit_tasks(self, *args, **kwargs):
-        """
-        Run the tasks till self.exit_iteration says to exit 
-        or the number of iterations exceeds self.max_niter
-
-        Returns: 
-            dictionary with the final results
-        """
-        self.niter = 1
-
-        while True:
-            if self.niter > self.max_niter > 0:
-                logger.debug("niter %d > max_niter %d" % (self.niter, self.max_niter))
-                break
-
-            try:
-                task = self.next_task()
-            except StopIteration:
-                break
-
-            # Start the task and block till completion.
-            task.start(*args, **kwargs)
-            task.wait()
-
-            data = self.exit_iteration(*args, **kwargs)
-
-            if data["exit"]:
-                break
-
-            self.niter += 1
-
-    @abc.abstractmethod
-    def exit_iteration(self, *args, **kwargs):
-        """
-        Return a dictionary with the results produced at the given iteration.
-        The dictionary must contains an entry "converged" that evaluates to
-        True if the iteration should be stopped.
-        """
-
-
-def check_conv(values, tol, min_numpts=1, mode="abs", vinf=None):
-    """
-    Given a list of values and a tolerance tol, returns the leftmost index for which
-
-        abs(value[i] - vinf) < tol if mode == "abs"
-
-    or
-
-        abs(value[i] - vinf) / vinf < tol if mode == "rel"
-
-    returns -1 if convergence is not achieved. By default, vinf = values[-1]
-
-    Args:
-        tol:
-            Tolerance
-        min_numpts:
-            Minimum number of points that must be converged.
-        mode:
-            "abs" for absolute convergence, "rel" for relative convergence.
-        vinf:
-            Used to specify an alternative value instead of values[-1].
-    """
-    vinf = values[-1] if vinf is None else vinf
-
-    if mode == "abs":
-        vdiff = [abs(v - vinf) for v in values]
-    elif mode == "rel":
-        vdiff = [abs(v - vinf) / vinf for v in values]
-    else:
-        raise ValueError("Wrong mode %s" % mode)
-
-    numpts = len(vdiff)
-    i = -2
-
-    if (numpts > min_numpts) and vdiff[-2] < tol:
-        for i in range(numpts-1, -1, -1):
-            if vdiff[i] > tol:
-                break
-        if (numpts - i -1) < min_numpts: i = -2
-
-    return i + 1
-
-
-def compute_hints(ecut_list, etotal, atols_mev, pseudo, min_numpts=1, stream=sys.stdout):
-    de_low, de_normal, de_high = [a / (1000 * Ha_to_eV) for a in atols_mev]
-
-    num_ene = len(etotal)
-    etotal_inf = etotal[-1]
-
-    ihigh   = check_conv(etotal, de_high, min_numpts=min_numpts)
-    inormal = check_conv(etotal, de_normal)
-    ilow    = check_conv(etotal, de_low)
-
-    accidx = {"H": ihigh, "N": inormal, "L": ilow}
-
-    table = []; app = table.append
-
-    app(["iter", "ecut", "etotal", "et-e_inf [meV]", "accuracy",])
-    for idx, (ec, et) in enumerate(zip(ecut_list, etotal)):
-        line = "%d %.1f %.7f %.3f" % (idx, ec, et, (et-etotal_inf) * Ha_to_eV * 1.e+3)
-        row = line.split() + ["".join(c for c,v in accidx.items() if v == idx)]
-        app(row)
-
-    if stream is not None:
-        stream.write("pseudo: %s\n" % pseudo.name)
-        pprint_table(table, out=stream)
-
-    ecut_high, ecut_normal, ecut_low = 3 * (None,)
-    exit = (ihigh != -1)
-
-    if exit:
-        ecut_low    = ecut_list[ilow]
-        ecut_normal = ecut_list[inormal]
-        ecut_high   = ecut_list[ihigh]
-
-    aug_ratios = [1,]
-    aug_ratio_low, aug_ratio_normal, aug_ratio_high = 3 * (1,)
-
-    data = {
-        "exit"       : ihigh != -1,
-        "etotal"     : list(etotal),
-        "ecut_list"  : ecut_list,
-        "aug_ratios" : aug_ratios,
-        "low"        : {"ecut": ecut_low, "aug_ratio": aug_ratio_low},
-        "normal"     : {"ecut": ecut_normal, "aug_ratio": aug_ratio_normal},
-        "high"       : {"ecut": ecut_high, "aug_ratio": aug_ratio_high},
-        "pseudo_name": pseudo.name,
-        "pseudo_path": pseudo.path,
-        "atols_mev"  : atols_mev,
-        "dojo_level" : 0,
-    }
-
-    return data
-
-
-def plot_etotal(ecut_list, etotals, aug_ratios, **kwargs):
-    """
-    Uses Matplotlib to plot the energy curve as function of ecut
-
-    Args:
-        ecut_list:
-            List of cutoff energies
-        etotals:
-            Total energies in Hartree, see aug_ratios
-        aug_ratios:
-            List augmentation rations. [1,] for norm-conserving, [4, ...] for PAW
-            The number of elements in aug_ration must equal the number of (sub)lists
-            in etotals. Example:
-
-                - NC: etotals = [3.4, 4,5 ...], aug_ratios = [1,]
-                - PAW: etotals = [[3.4, ...], [3.6, ...]], aug_ratios = [4,6]
-
-        =========     ==============================================================
-        kwargs        description
-        =========     ==============================================================
-        show          True to show the figure
-        savefig       'abc.png' or 'abc.eps'* to save the figure to a file.
-        =========     ==============================================================
-
-    Returns:
-        `matplotlib` figure.
-    """
-    show = kwargs.pop("show", True)
-    savefig = kwargs.pop("savefig", None)
-
-    import matplotlib.pyplot as plt
-    fig = plt.figure()
-    ax = fig.add_subplot(1,1,1)
-
-    npts = len(ecut_list)
-
-    if len(aug_ratios) != 1 and len(aug_ratios) != len(etotals):
-        raise ValueError("The number of sublists in etotal must equal the number of aug_ratios")
-
-    if len(aug_ratios) == 1:
-        etotals = [etotals,]
-
-    lines, legends = [], []
-
-    emax = -np.inf
-    for (aratio, etot) in zip(aug_ratios, etotals):
-        emev = np.array(etot) * Ha_to_eV * 1000
-        emev_inf = npts * [emev[-1]]
-        yy = emev - emev_inf
-
-        emax = np.max(emax, np.max(yy))
-
-        line, = ax.plot(ecut_list, yy, "-->", linewidth=3.0, markersize=10)
-
-        lines.append(line)
-        legends.append("aug_ratio = %s" % aratio)
-
-    ax.legend(lines, legends, 'upper right', shadow=True)
-
-    # Set xticks and labels.
-    ax.grid(True)
-    ax.set_xlabel("Ecut [Ha]")
-    ax.set_ylabel("$\Delta$ Etotal [meV]")
-    ax.set_xticks(ecut_list)
-
-    #ax.yaxis.set_view_interval(-10, emax + 0.01 * abs(emax))
-    #ax.xaxis.set_view_interval(-10, 20)
-    ax.yaxis.set_view_interval(-10, 20)
-
-    ax.set_title("$\Delta$ Etotal Vs Ecut")
-
-    if show:
-        plt.show()
-
-    if savefig is not None:
-        fig.savefig(savefig)
-
-    return fig
-
-
-class PseudoConvergence(Workflow):
-
-    def __init__(self, workdir, manager, pseudo, ecut_list, atols_mev,
-                 toldfe=1.e-8, spin_mode="polarized", 
-                 acell=(8, 9, 10), smearing="fermi_dirac:0.1 eV"):
-
-        super(PseudoConvergence, self).__init__(workdir, manager)
-
-        # Temporary object used to build the strategy.
-        generator = PseudoIterativeConvergence(workdir, manager, pseudo, ecut_list, atols_mev,
-                                               toldfe    = toldfe,
-                                               spin_mode = spin_mode,
-                                               acell     = acell,
-                                               smearing  = smearing,
-                                               max_niter = len(ecut_list),
-                                              )
-        self.atols_mev = atols_mev
-        self.pseudo = Pseudo.aspseudo(pseudo)
-
-        self.ecut_list = []
-        for ecut in ecut_list:
-            strategy = generator.strategy_with_ecut(ecut)
-            self.ecut_list.append(ecut)
-            self.register(strategy)
-
-    def get_results(self):
-
-        # Get the results of the tasks.
-        wf_results = super(PseudoConvergence, self).get_results()
-
-        etotal = self.read_etotal()
-        data = compute_hints(self.ecut_list, etotal, self.atols_mev, self.pseudo)
-
-        plot_etotal(data["ecut_list"], data["etotal"], data["aug_ratios"],
-            show=False, savefig=self.path_in_workdir("etotal.pdf"))
-
-        wf_results.update(data)
-
-        if not monotonic(etotal, mode="<", atol=1.0e-5):
-            logger.warning("E(ecut) is not decreasing")
-            wf_results.push_exceptions("E(ecut) is not decreasing:\n" + str(etotal))
-
-        #if kwargs.get("json_dump", True):
-        #    wf_results.json_dump(self.path_in_workdir("results.json"))
-
-        return wf_results
-
-
-class PseudoIterativeConvergence(IterativeWorkflow):
-
-    def __init__(self, workdir, manager, pseudo, ecut_list_or_slice, atols_mev,
-                 toldfe=1.e-8, spin_mode="polarized", 
-                 acell=(8, 9, 10), smearing="fermi_dirac:0.1 eV", max_niter=50,):
-        """
-        Args:
-            workdir:
-                Working directory.
-            pseudo:
-                string or Pseudo instance
-            ecut_list_or_slice:
-                List of cutoff energies or slice object (mainly used for infinite iterations).
-            atols_mev:
-                List of absolute tolerances in meV (3 entries corresponding to accuracy ["low", "normal", "high"]
-            manager:
-                `TaskManager` object.
-            spin_mode:
-                Defined how the electronic spin will be treated.
-            acell:
-                Lengths of the periodic box in Bohr.
-            smearing:
-                Smearing instance or string in the form "mode:tsmear". Default: FemiDirac with T=0.1 eV
-        """
-        self.pseudo = Pseudo.aspseudo(pseudo)
-
-        self.atols_mev = atols_mev
-        self.toldfe = toldfe
-        self.spin_mode = spin_mode
-        self.smearing = Smearing.assmearing(smearing)
-        self.acell = acell
-
-        if isinstance(ecut_list_or_slice, slice):
-            self.ecut_iterator = iterator_from_slice(ecut_list_or_slice)
-        else:
-            self.ecut_iterator = iter(ecut_list_or_slice)
-
-        # Construct a generator that returns strategy objects.
-        def strategy_generator():
-            for ecut in self.ecut_iterator:
-                yield self.strategy_with_ecut(ecut)
-
-        super(PseudoIterativeConvergence, self).__init__(strategy_generator(), 
-              max_niter=max_niter, workdir=workdir, manager=manager, )
-
-        if not self.isnc:
-            raise NotImplementedError("PAW convergence tests are not supported yet")
-
-    def strategy_with_ecut(self, ecut):
-        """Return a Strategy instance with given cutoff energy ecut."""
-
-        # Define the system: one atom in a box of lenghts acell.
-        boxed_atom = AbiStructure.boxed_atom(self.pseudo, acell=self.acell)
-
-        # Gamma-only sampling.
-        gamma_only = KSampling.gamma_only()
-
-        # Setup electrons.
-        electrons = Electrons(spin_mode=self.spin_mode, smearing=self.smearing)
-
-        # Don't write WFK files.
-        extra_abivars = {
-            "ecut" : ecut,
-            "prtwf": 0,
-            "toldfe": self.toldfe,
-        }
-
-        strategy = ScfStrategy(boxed_atom, self.pseudo, gamma_only,
-                               spin_mode=self.spin_mode, smearing=self.smearing,
-                               charge=0.0, scf_algorithm=None,
-                               use_symmetries=True, **extra_abivars)
-
-        return strategy
-
-    @property
-    def ecut_list(self):
-        """The list of cutoff energies computed so far"""
-        return [float(task.strategy.ecut) for task in self]
-
-    def check_etotal_convergence(self, *args, **kwargs):
-        return compute_hints(self.ecut_list, self.read_etotal(), self.atols_mev,
-                             self.pseudo)
-
-    def exit_iteration(self, *args, **kwargs):
-        return self.check_etotal_convergence(self, *args, **kwargs)
-
-    def get_results(self):
-        """Return the results of the tasks."""
-        wf_results = super(PseudoIterativeConvergence, self).get_results()
-
-        data = self.check_etotal_convergence()
-
-        ecut_list, etotal, aug_ratios = data["ecut_list"],  data["etotal"], data["aug_ratios"]
-
-        plot_etotal(ecut_list, etotal, aug_ratios,
-            show=False, savefig=self.path_in_workdir("etotal.pdf"))
-
-        wf_results.update(data)
-
-        if not monotonic(data["etotal"], mode="<", atol=1.0e-5):
-            logger.warning("E(ecut) is not decreasing")
-            wf_results.push_exceptions("E(ecut) is not decreasing\n" + str(etotal))
-
-        #if kwargs.get("json_dump", True):
-        #    wf_results.json_dump(self.path_in_workdir("results.json"))
-
-        return wf_results
 
 
 class BandStructureWorkflow(Workflow):
@@ -1135,182 +768,33 @@ class RelaxWorkflow(Workflow):
     def on_ok(self, sender):
         """
         This callback is called when one task reaches status S_OK.
+        If sender == self.ion_task, we update the initial structure
+        used by self.ioncell_task and we unlock it so that the job can be submitted.
         """
         logger.debug("in on_ok with sender %s" % sender)
 
         if sender == self.ion_task and not self.transfer_done:
-            # Get the relaxed structure.
+            # Get the relaxed structure from ion_task
             ion_structure = self.ion_task.read_final_structure()
-            print("ion_structure", ion_structure)
+            print("Got relaxed ion_structure", ion_structure)
 
-            # Transfer it to the ioncell task (do it only once).
+            # Transfer it to the ioncell task (we do it only once).
             self.ioncell_task.change_structure(ion_structure)
             self.transfer_done = True
 
-            # Finally unlock ioncell_task so that we can submit it.
+            # Unlock ioncell_task so that we can submit it.
             self.ioncell_task.set_status(self.S_READY)
 
-        base_results = super(RelaxWorkflow, self).on_ok(sender)
-        return base_results
-
-
-class DeltaFactorWorkflow(Workflow):
-
-    def __init__(self, structure_or_cif, pseudo, kppa,
-                 spin_mode="polarized", toldfe=1.e-8, smearing="fermi_dirac:0.1 eV",
-                 accuracy="normal", ecut=None, pawecutdg=None, ecutsm=0.05, chksymbreak=0,
-                 workdir=None, manager=None, **kwargs):
-                 # FIXME Hack in chksymbreak
-        """
-        Build a `Workflow` for the computation of the deltafactor.
-
-        Args:   
-            structure_or_cif:
-                Structure objec or string with the path of the CIF file.
-            pseudo:
-                String with the name of the pseudopotential file or `Pseudo` object.` object.` object.` 
-            kppa:
-                Number of k-points per atom.
-            spin_mode:
-                Spin polarization mode.
-            toldfe:
-                Tolerance on the energy (Ha)
-            smearing:
-                Smearing technique.
-            workdir:
-                String specifing the working directory.
-            manager:
-                `TaskManager` responsible for the submission of the tasks.
-        """
-        super(DeltaFactorWorkflow, self).__init__(workdir=workdir, manager=manager)
-
-        if isinstance(structure_or_cif, Structure):
-            structure = structure_or_cif
-        else:
-            # Assume CIF file
-            structure = read_structure(structure_or_cif)
-
-        self.pseudo = Pseudo.aspseudo(pseudo)
-
-        structure = AbiStructure.asabistructure(structure)
-
-        smearing = Smearing.assmearing(smearing)
-
-        self._input_structure = structure
-
-        v0 = structure.volume
-
-        # From 94% to 106% of the equilibrium volume.
-        self.volumes = v0 * np.arange(94, 108, 2) / 100.
-
-        for vol in self.volumes:
-            new_lattice = structure.lattice.scale(vol)
-
-            new_structure = Structure(new_lattice, structure.species, structure.frac_coords)
-            new_structure = AbiStructure.asabistructure(new_structure)
-
-            extra_abivars = dict(
-                pawecutdg=pawecutdg,
-                ecutsm=ecutsm,
-                toldfe=toldfe,
-                prtwf=0,
-                paral_kgb=0,
-            )
-
-            extra_abivars.update(**kwargs)
-
-            if ecut is not None:
-                extra_abivars.update({"ecut": ecut})
-
-            ksampling = KSampling.automatic_density(new_structure, kppa,
-                                                    chksymbreak=chksymbreak)
-
-            scf_input = ScfStrategy(new_structure, self.pseudo, ksampling,
-                                    accuracy=accuracy, spin_mode=spin_mode,
-                                    smearing=smearing, **extra_abivars)
-
-            self.register(scf_input, task_class=ScfTask)
-
-    def get_results(self):
-        num_sites = self._input_structure.num_sites
-
-        etotal = ArrayWithUnit(self.read_etotal(), "Ha").to("eV")
-
-        wf_results = super(DeltaFactorWorkflow, self).get_results()
-
-        wf_results.update({
-            "etotal"    : list(etotal),
-            "volumes"   : list(self.volumes),
-            "natom"     : num_sites,
-            "dojo_level": 1,
-        })
-
-        try:
-            #eos_fit = EOS.Murnaghan().fit(self.volumes/num_sites, etotal/num_sites)
-            #print("murn",eos_fit)
-            #eos_fit.plot(show=False, savefig=self.path_in_workdir("murn_eos.pdf"))
-
-            # Use same fit as the one employed for the deltafactor.
-            eos_fit = EOS.DeltaFactor().fit(self.volumes/num_sites, etotal/num_sites)
-
-            eos_fit.plot(show=False, savefig=self.outdir.path_in("eos.pdf"))
-
-            # FIXME: This object should be moved to pseudo_dojo.
-            # Get reference results (Wien2K).
-            from pseudo_dojo.refdata.deltafactor import df_database, df_compute
-            wien2k = df_database().get_entry(self.pseudo.symbol)
-                                                                                                 
-            # Compute deltafactor estimator.
-            dfact = df_compute(wien2k.v0, wien2k.b0_GPa, wien2k.b1,
-                               eos_fit.v0, eos_fit.b0_GPa, eos_fit.b1, b0_GPa=True)
-
-            print("delta",eos_fit)
-            print("Deltafactor = %.3f meV" % dfact)
-
-            wf_results.update({
-                "v0": eos_fit.v0,
-                "b0": eos_fit.b0,
-                "b0_GPa": eos_fit.b0_GPa,
-                "b1": eos_fit.b1,
-            })
-
-        except EOS.Error as exc:
-            wf_results.push_exceptions(exc)
-
-        #if kwargs.get("json_dump", True):
-        #    wf_results.json_dump(self.path_in_workdir("results.json"))
-
-        # Write data for the computation of the delta factor
-        with open(self.outdir.path_in("deltadata.txt"), "w") as fh:
-            fh.write("# Deltafactor = %s meV\n" % dfact)
-            fh.write("# Volume/natom [Ang^3] Etotal/natom [eV]\n")
-            for (v, e) in zip(self.volumes, etotal):
-                fh.write("%s %s\n" % (v/num_sites, e/num_sites))
-
-        return wf_results
-
-    def on_all_ok(self):
-        return self.get_results()
-
-    #def make_report(self, results, **kwargs):
-    #    d = dict(v0=v0,
-    #             b0_GPa=b0_GPa,
-    #             b1=b1,
-    #             dfact=dfact
-    #            )
-    #    if results.exceptions:
-    #        d["_exceptions"] = str(results.exceptions)
-    #                                                                                         
-    #    d = {self.accuracy: d}
+        return super(RelaxWorkflow, self).on_ok(sender)
 
 
 class G0W0_Workflow(Workflow):
-
+    """
+    Workflow for G0W0 calculations.
+    """
     def __init__(self, scf_input, nscf_input, scr_input, sigma_inputs,
                  workdir=None, manager=None):
         """
-        Workflow for G0W0 calculations.
-
         Args:
             scf_input:
                 Input for the SCF run or `SCFStrategy` object.
@@ -1328,10 +812,15 @@ class G0W0_Workflow(Workflow):
         super(G0W0_Workflow, self).__init__(workdir=workdir, manager=manager)
 
         # Register the GS-SCF run.
-        self.scf_task = scf_task = self.register(scf_input, task_class=ScfTask)
+        # register all scf_inputs but link the nscf only the last scf in the list
+        if isinstance(scf_input, (list, tuple)):
+            for single_scf_input in scf_input:
+                self.scf_task = self.register(single_scf_input, task_class=ScfTask)
+        else:
+            self.scf_task = self.register(scf_input, task_class=ScfTask)
 
         # Construct the input for the NSCF run.
-        self.nscf_task = nscf_task = self.register(nscf_input, deps={scf_task: "DEN"}, task_class=NscfTask)
+        self.nscf_task = nscf_task = self.register(nscf_input, deps={self.scf_task: "DEN"}, task_class=NscfTask)
 
         # Register the SCREENING run.
         self.scr_task = scr_task = self.register(scr_input, deps={nscf_task: "WFK"})
@@ -1347,16 +836,16 @@ class G0W0_Workflow(Workflow):
 
 
 class SigmaConvWorkflow(Workflow):
-
+    """
+    Workflow for self-energy convergence studies.
+    """
     def __init__(self, wfk_node, scr_node, sigma_inputs, workdir=None, manager=None):
         """
-        Workflow for self-energy convergence studies.
-
         Args:
             wfk_node:
-                The node who has produced the WFK file
+                The node who has produced the WFK file or filepath pointing to the WFK file.
             scr_node:
-                The node who has produced the SCR file
+                The node who has produced the SCR file or filepath pointing to the SCR file.
             sigma_inputs:
                 List of Strategies for the self-energy run.
             workdir:
@@ -1364,6 +853,10 @@ class SigmaConvWorkflow(Workflow):
             manager:
                 `TaskManager` object.
         """
+        # Cast to node instances.
+        wfk_node = Node.as_node(wfk_node)
+        scr_node = Node.as_node(scr_node)
+
         super(SigmaConvWorkflow, self).__init__(workdir=workdir, manager=manager)
 
         # Register the SIGMA runs.
@@ -1374,73 +867,21 @@ class SigmaConvWorkflow(Workflow):
             self.register(sigma_input, deps={wfk_node: "WFK", scr_node: "SCR"})
 
 
-#class SCGW_Workflow(Workflow):
-#
-#    def __init__(self, scr_input, sigma_input, workdir=None, manager=None):
-#        """
-#        Workflow for G0W0 calculations.
-#
-#        Args:
-#            scr_input:
-#                Input for the screening run or `ScrStrategy` object 
-#            sigma_input:
-#                Strategy for the self-energy run.
-#            workdir:
-#                Working directory of the calculation.
-#            manager:
-#                `TaskManager` object.
-#        """
-#        super(SCGW_Workflow, self).__init__(workdir=workdir, manager=manager)
-#
-#        # Register the SCREENING run.
-#        self.scr_task = self.register(scr_input, deps={nscf_task: "WFK"})
-#
-#        # Register the SIGMA run.
-#        self.sigma_task = self.register(sigma_input, deps={self.nscf_task: "WFK", self.scr_task: "SCR"})
-#
-#    def not_converged(self):
-#       return self.sigma_task.not_converged()
-#
-#    def restart(self):
-#        ext = "QPS"
-#        qps_file = self.sigma_task.outdir.has_abiext(ext)
-#        irdvars = irdvars_for_ext(ext)
-#
-#        if not qps_file:
-#            raise TaskRestartError("Cannot find the QPS file to restart from.")
-#
-#        # Move the QPS file produced by the SIGMA task to 
-#        # the indir of the SCR task and the indir of the SIGMA task.
-#        scr_infile = self.scr_task.indir.path_in(os.path.basename(qps_file)
-#        sigma_infile = self.sigma_task.indir.path_in(os.path.basename(qps_file)
-#        shutil.copy(qps_file, scr_infile)
-#        shutil.move(qps_file, sigma_infile)
-#
-#        # Add the appropriate variable for reading the QPS file.
-#        self.scr_task.strategy.add_extra_abivars(irdvars)
-#        self.sigma_task.strategy.add_extra_abivars(irdvars)
-#
-#        # Now we can resubmit the job.
-#        #for task in self.
-#        #    task.reset()
-#        self._restart()
-
-
 class BSEMDF_Workflow(Workflow):
-
-    def __init__(self, scf_input, nscf_input, bse_input, workdir=None, manager=None):
+    """
+    Workflow for simple BSE calculations in which the self-energy corrections
+    are approximated by the scissors operator and the screening in modeled
+    with the model dielectric function.
+    """
+    def __init__(self, scf_input, nscf_input, bse_inputs, workdir=None, manager=None):
         """
-        Workflow for simple BSE calculations in which the self-energy corrections 
-        are approximated by the scissors operator and the screening in modeled 
-        with the model dielectric function.
-
         Args:
             scf_input:
                 Input for the SCF run or `ScfStrategy` object.
             nscf_input:
                 Input for the NSCF run or `NscfStrategy` object.
-            bse_input:
-                Input for the BSE run or `BSEStrategy` object.
+            bse_inputs:
+                List of Inputs for the BSE run or `BSEStrategy` object.
             workdir:
                 Working directory of the calculation.
             manager:
@@ -1454,8 +895,185 @@ class BSEMDF_Workflow(Workflow):
         # Construct the input for the NSCF run.
         self.nscf_task = self.register(nscf_input, deps={self.scf_task: "DEN"}, task_class=NscfTask)
 
-        # Construct the input for the BSE run.
-        self.bse_task = self.register(bse_input, deps={self.nscf_task: "WFK"}, task_class=HaydockBseTask)
+        # Construct the input(s) for the BSE run.
+        if not isinstance(bse_inputs, (list, tuple)):
+            bse_inputs = [bse_inputs]
+
+        for bse_input in bse_inputs:
+            self.register(bse_input, deps={self.nscf_task: "WFK"}, task_class=BseTask)
+
+
+class QptdmWorkflow(Workflow):
+    """
+    This workflow parallelizes the calculation of the q-points of the screening.
+    It also provides the callback `on_all_ok` that calls mrgscr to merge
+    all the partial screening files produced.
+    """
+    def create_tasks(self, wfk_file, scr_input):
+        """
+        Create the SCR tasks and register them in self.
+
+        Args:
+            wfk_file:
+                Path to the ABINIT WFK file to use for the computation of the screening.
+            scr_input:
+                Input for the screening calculation.
+        """
+        assert len(self) == 0
+        wfk_file = self.wfk_file = os.path.abspath(wfk_file)
+
+        # Build a temporary workflow in the tmpdir that will use a shell manager
+        # to run ABINIT in order to get the list of q-points for the screening.
+        shell_manager = self.manager.to_shell_manager(mpi_procs=1)
+
+        w = Workflow(workdir=self.tmpdir.path_join("_qptdm_run"), manager=shell_manager)
+
+        fake_input = scr_input.deepcopy()
+        fake_task = w.register(fake_input)
+        w.allocate()
+        w.build()
+
+        # Create the symbolic link and add the magic value
+        # nqpdm = -1 to the input to get the list of q-points.
+        fake_task.inlink_file(wfk_file)
+        fake_task.strategy.add_extra_abivars({"nqptdm": -1})
+        fake_task.start_and_wait()
+
+        # Parse the section with the q-points
+        try:
+            qpoints = yaml_read_kpoints(fake_task.log_file.path, doc_tag="!Qptdms")
+            #print(qpoints)
+        finally:
+            w.rmtree()
+
+        # Now we can register the task for the different q-points
+        for qpoint in qpoints:
+            qptdm_input = scr_input.deepcopy()
+            qptdm_input.set_variables(nqptdm=1, qptdm=qpoint)
+
+            self.register(qptdm_input, manager=self.manager)
+
+        self.allocate()
+
+    def merge_scrfiles(self, remove_scrfiles=True):
+        """
+        This method is called when all the q-points have been computed.
+        It runs `mrgscr` in sequential on the local machine to produce
+        the final SCR file in the outdir of the `Workflow`.
+        If remove_scrfiles is True, the partial SCR files are removed after the merge.
+        """
+        scr_files = list(filter(None, [task.outdir.has_abiext("SCR") for task in self]))
+
+        logger.debug("will call mrgscr to merge %s:\n" % str(scr_files))
+        assert len(scr_files) == len(self)
+
+        # TODO: Propapagate the manager to the wrappers
+        mrgscr = wrappers.Mrgscr(verbose=1)
+        mrgscr.set_mpi_runner("mpirun")
+        final_scr = mrgscr.merge_qpoints(scr_files, out_prefix="out", cwd=self.outdir.path)
+
+        if remove_scrfiles:
+            for scr_file in scr_files:
+                try:
+                    os.remove(scr_file)
+                except IOError:
+                    pass
+
+        return final_scr
+
+    def on_all_ok(self):
+        """
+        This method is called when all the q-points have been computed.
+        It runs `mrgscr` in sequential on the local machine to produce
+        the final SCR file in the outdir of the `Workflow`.
+        """
+        final_scr = self.merge_scrfiles()
+        return self.Results(node=self,returncode=0, message="mrgscr done", final_scr=final_scr)
+
+
+def build_oneshot_phononwork(scf_input, ph_inputs, workdir=None, manager=None, work_class=None):
+    """
+    Returns a workflow for the computation of phonon frequencies
+    ph_inputs is a list of input for Phonon calculation in which all the independent perturbations 
+    are explicitly computed i.e. 
+
+        * rfdir 1 1 1
+        * rfatpol 1 natom
+
+    .. warning:
+        This workflow is mainly used for simple calculations, e.g. converge studies.
+        Use ``PhononWorkflow`` for better efficiency.
+    """
+    work_class = OneShotPhononWorkflow if work_class is None else work_class
+    work = work_class(workdir=workdir, manager=manager)
+    scf_task = work.register_scf_task(scf_input)
+
+    ph_inputs = [ph_inputs] if not isinstance(ph_inputs, (list, tuple)) else ph_inputs
+    for phinp in ph_inputs:
+        # cannot use PhononTaks here because the Task is not able to deal with multiple phonon calculations
+        #ph_task = work.register_phonon_task(phinp, deps={scf_task: "WFK"})
+        ph_task = work.register(phinp, deps={scf_task: "WFK"})
+
+    return work
+
+
+class OneShotPhononWorkflow(Workflow):
+    """
+    Simple and very inefficient workflow for the computation of the phonon frequencies
+    It consists of a GS task and a DFPT calculations for all the independent perturbations.
+    The main advantage is that one has direct access to the phonon frequencies that
+    can be computed at the end of the second task without having to call anaddb.
+
+    Use ``build_oneshot_phononwork`` to construct this workflow from the input files.
+    """
+    def read_phonons(self):
+        """Read phonon frequencies from the output file."""
+        # 
+        #   Phonon wavevector (reduced coordinates) :  0.00000  0.00000  0.00000
+        #  Phonon energies in Hartree :
+        #    1.089934E-04  4.990512E-04  1.239177E-03  1.572715E-03  1.576801E-03
+        #    1.579326E-03
+        #  Phonon frequencies in cm-1    :
+        # -  2.392128E+01  1.095291E+02  2.719679E+02  3.451711E+02  3.460677E+02
+        # -  3.466221E+02
+        BEGIN = "  Phonon wavevector (reduced coordinates) :"
+        END = " Phonon frequencies in cm-1    :"
+
+        ph_tasks, qpts, phfreqs = self[1:], [], []
+        for task in ph_tasks:
+
+            with open(task.output_file.path, "r") as fh:
+                qpt, inside = None, 0 
+                for line in fh:
+                    if line.startswith(BEGIN):
+                        qpts.append([float(s) for s in line[len(BEGIN):].split()])
+                        inside, omegas = 1, []
+                    elif line.startswith(END):
+                        break
+                    elif inside:
+                        inside += 1
+                        if inside > 2:
+                            omegas.extend((float(s) for s in line.split()))
+                else:
+                    raise ValueError("Cannot find %s in file %s" % (END, task.output_file.path))
+                phfreqs.append(omegas)
+
+        # Use namedtuple to store q-point and frequencies in meV
+        phonon = collections.namedtuple("phonon", "qpt freqs")
+        return [phonon(qpt=qpt, freqs=freqs_meV) for qpt, freqs_meV in zip(qpts, EnergyArray(phfreqs, "Ha").to("meV") )]
+
+    def get_results(self, **kwargs):
+        results = super(self.__class__, self).get_results()
+        phonons = self.read_phonons()
+        print(phonons)
+        results.update(phonons=phonons)
+
+        return results
+
+    #def on_all_ok(self):
+    #    """
+    #    """
+    #    return self.get_results()
 
 
 class PhononWorkflow(Workflow):
@@ -1468,10 +1086,13 @@ class PhononWorkflow(Workflow):
     def merge_ddb_files(self):
         """
         This method is called when all the q-points have been computed.
-        Ir runs `mrgddb` in sequential on the local machine to produce
+        It runs `mrgddb` in sequential on the local machine to produce
         the final DDB file in the outdir of the `Workflow`.
+
+        Returns:
+            path to the output DDB file
         """
-        ddb_files = filter(None, [task.outdir.has_abiext("DDB") for task in self])
+        ddb_files = list(filter(None, [task.outdir.has_abiext("DDB") for task in self]))
 
         logger.debug("will call mrgddb to merge %s:\n" % str(ddb_files))
         assert len(ddb_files) == len(self)
@@ -1483,31 +1104,11 @@ class PhononWorkflow(Workflow):
         out_ddb = self.outdir.path_in("out_DDB")
         desc = "DDB file merged by %s on %s" % (self.__class__.__name__, time.asctime())
 
+        # TODO: propagate the taskmanager
         mrgddb = wrappers.Mrgddb(verbose=1)
         mrgddb.set_mpi_runner("mpirun")
         mrgddb.merge(ddb_files, out_ddb=out_ddb, description=desc, cwd=self.outdir.path)
-
-    def merge_gkk_files(self):
-        """
-        This method is called when all the q-points have been computed.
-        Ir runs `mrgddb` in sequential on the local machine to produce
-        the final DDB file in the outdir of the `Workflow`.
-        """
-        gkk_files = filter(None, [task.outdir.has_abiext("GKK") for task in self])
-                                                                                         
-        logger.debug("Will call mrggkk to merge %s:\n" % str(gkk_files))
-        assert len(gkk) == len(self)
-
-        #if len(gkk) == 1:
-        # Avoid the merge. Just move the GKK file to the outdir of the workflow
-                                                                                         
-        # Final GKK file will be produced in the outdir of the workflow.
-        out_ggk = self.outdir.path_in("out_GKK")
-
-        mrggkk = wrappers.Mrggkk(verbose=1)
-        mrggkk.set_mpi_runner("mpirun")
-        raise NotImplementedError("Have to check mrggkk")
-        #mrggkk.merge(gswfk_file, dfpt_files, gkk_files, out_fname, binascii=0, cwd=self.outdir.path)
+        return out_ddb
 
     def on_all_ok(self):
         """
@@ -1516,63 +1117,10 @@ class PhononWorkflow(Workflow):
         the final DDB file in the outdir of the `Workflow`.
         """
         # Merge DDB files.
-        self.merge_ddb_files()
+        out_ddb = self.merge_ddb_files()
 
-        # Merge GKK files.
-        #self.merge_gkk_files()
+        results = self.Results(node=self,returncode=0, message="DDB merge done")
+        results.add_gridfs_files(DDB=(out_ddb, "t"))
 
-        return dict(returncode=0,
-                    message="DDB merge done"
-                    )
+        return results
 
-
-class WorkflowResults(dict, MSONable):
-    """
-    Dictionary used to store some of the results produce by a Task object
-    """
-    _MANDATORY_KEYS = [
-        "task_results",
-    ]
-
-    _EXC_KEY = "_exceptions"
-
-    def __init__(self, *args, **kwargs):
-        super(WorkflowResults, self).__init__(*args, **kwargs)
-
-        if self._EXC_KEY not in self:
-            self[self._EXC_KEY] = []
-
-    @property
-    def exceptions(self):
-        return self[self._EXC_KEY]
-
-    def push_exceptions(self, *exceptions):
-        for exc in exceptions:
-            newstr = str(exc)
-            if newstr not in self.exceptions:
-                self[self._EXC_KEY] += [newstr]
-
-    def assert_valid(self):
-        """
-        Returns empty string if results seem valid.
-
-        The try assert except trick allows one to get a string with info on the exception.
-        We use the += operator so that sub-classes can add their own message.
-        """
-        # Validate tasks.
-        for tres in self.task_results:
-            self[self._EXC_KEY] += tres.assert_valid()
-
-        return self[self._EXC_KEY]
-
-    @property
-    def to_dict(self):
-        d = {k: v for k,v in self.items()}
-        d["@module"] = self.__class__.__module__
-        d["@class"] = self.__class__.__name__
-        return d
-
-    @classmethod
-    def from_dict(cls, d):
-        mydict = {k: v for k, v in d.items() if k not in ["@module", "@class"]}
-        return cls(mydict)

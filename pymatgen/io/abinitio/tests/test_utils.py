@@ -1,4 +1,6 @@
-from __future__ import division, print_function
+# coding: utf-8
+
+from __future__ import unicode_literals, division, print_function
 
 from pymatgen.util.testing import PymatgenTest
 from pymatgen.io.abinitio.utils import *
@@ -33,6 +35,20 @@ class RpnTest(PymatgenTest):
             print("rpn", rpn)
             self.assertEqual(res, evaluate_rpn(rpn), msg="map %s" % map)
 
+
+class ConditionTest(PymatgenTest):
+    def test_condition(self):
+        c = Condition({}) 
+        assert not c
+        print(c)
+
+        class A(object): 
+            def __init__(self):
+                self.one = 1.0
+
+        aobj = A()
+        assert Condition({"one": 1.0})(aobj)
+        assert not Condition({"one": 2.0})(aobj)
 
 if __name__ == '__main__':
     import unittest
